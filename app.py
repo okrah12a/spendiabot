@@ -11,6 +11,7 @@ No AI calls, no external paid services — just SQLite + arithmetic.
 
 import os
 import re
+import datetime
 import requests
 from flask import Flask, request, jsonify
 
@@ -40,8 +41,8 @@ def send_message(chat_id, text, keyboard=None):
     requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=10)
 
 
-def fmt(amount):
-    return f"{CURRENCY}{amount:,.0f}"
+def fmt(amount, currency=None):
+    return f"{currency or CURRENCY}{amount:,.0f}"
 
 
 # ---------------------------------------------------------------- commands
@@ -66,7 +67,7 @@ def cmd_income(chat_id, args):
         return
     amount = float(args[0])
     db.set_income(chat_id, amount)
-    send_message(chat_id, f"✅ Monthly income set to {fmt(amount)}")
+    send_message(chat_id, f"✅ Monthly income set to {fmt(amount, db.get_currency(chat_id))}")
 
 
 def cmd_setbudget(chat_id, args):
@@ -76,7 +77,8 @@ def cmd_setbudget(chat_id, args):
     amount = float(args[-1])
     category = " ".join(args[:-1])
     db.set_budget(chat_id, category, amount)
-    send_message(chat_id, f"✅ Budget for *{category.title()}* set to {fmt(amount)}/month")
+    cur = db.get_currency(chat_id)
+    send_message(chat_id, f"✅ Budget for *{category.title()}* set to {fmt(amount, cur)}/month")
 
 
 def cmd_budget(chat_id, args):
@@ -84,12 +86,13 @@ def cmd_budget(chat_id, args):
     if not budgets:
         send_message(chat_id, "No budgets set yet. Try `/setbudget food 50000`")
         return
+    cur = db.get_currency(chat_id)
     spent = db.get_all_spent_this_month(chat_id)
     lines = ["💰 *My Budget*\n"]
     for cat, amt in budgets.items():
         used = spent.get(cat, 0)
         remaining = amt - used
-        lines.append(f"• {cat.title()}: {fmt(used)} / {fmt(amt)} ({fmt(remaining)} left)")
+        lines.append(f"• {cat.title()}: {fmt(used, cur)} / {fmt(amt, cur)} ({fmt(remaining, cur)} left)")
     send_message(chat_id, "\n".join(lines))
 
 
@@ -97,6 +100,7 @@ def _pace_warning(chat_id, category, budget_amount):
     """Return a warning string if projected spend will blow the budget, else None."""
     if not budget_amount:
         return None
+    cur = db.get_currency(chat_id)
     day, days_in_month, fraction_elapsed = db.month_progress()
     spent = db.get_category_spent_this_month(chat_id, category)
     used_fraction = spent / budget_amount
@@ -107,25 +111,29 @@ def _pace_warning(chat_id, category, budget_amount):
         f"⚠️ *{category.title()} budget warning*\n"
         f"You've used {used_fraction*100:.0f}% of this budget, "
         f"but you're only {fraction_elapsed*100:.0f}% through the month.\n"
-        f"At this pace, projected month-end spend: {fmt(projected)} "
-        f"(budget: {fmt(budget_amount)})"
+        f"At this pace, projected month-end spend: {fmt(projected, cur)} "
+        f"(budget: {fmt(budget_amount, cur)})"
     )
 
 
 def _log_expense(chat_id, amount, category, note=""):
     db.add_expense(chat_id, category, amount, note)
+    cur = db.get_currency(chat_id)
     spent_month = db.get_category_spent_this_month(chat_id, category)
     budgets = db.get_budgets(chat_id)
     budget_amount = budgets.get(category.lower())
 
-    lines = [f"✅ Logged {fmt(amount)} → *{category.title()}*"]
+    header = f"✅ Logged {fmt(amount, cur)} → *{category.title()}*"
+    if note:
+        header += f" _({note})_"
+    lines = [header]
     if budget_amount:
         remaining = budget_amount - spent_month
         pct = (spent_month / budget_amount * 100) if budget_amount else 0
-        lines.append(f"Monthly spending: {fmt(spent_month)} / {fmt(budget_amount)}")
-        lines.append(f"Remaining: {fmt(remaining)} ({pct:.0f}% used)")
+        lines.append(f"Monthly spending: {fmt(spent_month, cur)} / {fmt(budget_amount, cur)}")
+        lines.append(f"Remaining: {fmt(remaining, cur)} ({pct:.0f}% used)")
     else:
-        lines.append(f"Monthly spending: {fmt(spent_month)} (no budget set for this category)")
+        lines.append(f"Monthly spending: {fmt(spent_month, cur)} (no budget set for this category)")
     send_message(chat_id, "\n".join(lines))
 
     if budget_amount:
@@ -136,15 +144,16 @@ def _log_expense(chat_id, amount, category, note=""):
 
 def cmd_spend(chat_id, args):
     if len(args) < 2 or not args[0].replace(".", "", 1).isdigit():
-        send_message(chat_id, "Usage: `/spend 2500 food` (optionally add a note after)")
+        send_message(chat_id, "Usage: `/spend 2500 food (lunch with friends)`")
         return
     amount = float(args[0])
     category = args[1]
-    note = " ".join(args[2:])
+    note = " ".join(args[2:]).strip().strip("()").strip()
     _log_expense(chat_id, amount, category, note)
 
 
 def cmd_dashboard(chat_id, args):
+    cur = db.get_currency(chat_id)
     income = db.get_income(chat_id)
     budgets = db.get_budgets(chat_id)
     spent_by_cat = db.get_all_spent_this_month(chat_id)
@@ -155,14 +164,14 @@ def cmd_dashboard(chat_id, args):
 
     lines = [
         "📊 *Dashboard*\n",
-        f"💰 Income: {fmt(income)}",
-        f"💸 Spent: {fmt(total_spent)}",
-        f"💵 Remaining: {fmt(remaining)}\n",
+        f"💰 Income: {fmt(income, cur)}",
+        f"💸 Spent: {fmt(total_spent, cur)}",
+        f"💵 Remaining: {fmt(remaining, cur)}\n",
     ]
     for cat, amt in budgets.items():
         used = spent_by_cat.get(cat, 0)
-        lines.append(f"• {cat.title()} — {fmt(amt - used)} left")
-    lines.append(f"\nDaily average: {fmt(daily_avg)}")
+        lines.append(f"• {cat.title()} — {fmt(amt - used, cur)} left")
+    lines.append(f"\nDaily average: {fmt(daily_avg, cur)}")
     send_message(chat_id, "\n".join(lines))
 
 
@@ -170,6 +179,7 @@ def cmd_category(chat_id, args):
     if not args:
         send_message(chat_id, "Usage: `/category food`")
         return
+    cur = db.get_currency(chat_id)
     category = " ".join(args).lower()
     budgets = db.get_budgets(chat_id)
     budget_amount = budgets.get(category)
@@ -178,7 +188,7 @@ def cmd_category(chat_id, args):
     if budget_amount is None:
         send_message(
             chat_id,
-            f"📁 *{category.title()}*\nSpent this month: {fmt(spent)}\n"
+            f"📁 *{category.title()}*\nSpent this month: {fmt(spent, cur)}\n"
             f"No budget set for this category — try `/setbudget {category} 50000`",
         )
         return
@@ -187,31 +197,45 @@ def cmd_category(chat_id, args):
     pct = (spent / budget_amount * 100) if budget_amount else 0
     lines = [
         f"📁 *{category.title()}*\n",
-        f"Budget: {fmt(budget_amount)}/month",
-        f"Spent: {fmt(spent)} ({pct:.0f}% used)",
-        f"Remaining: {fmt(remaining)}",
+        f"Budget: {fmt(budget_amount, cur)}/month",
+        f"Spent: {fmt(spent, cur)} ({pct:.0f}% used)",
+        f"Remaining: {fmt(remaining, cur)}",
     ]
+    recent = db.get_recent_expenses(chat_id, category=category, limit=5)
+    if recent:
+        lines.append("\n_Recent (id — date — amount):_")
+        for r in recent:
+            entry = f"   [{r['id']}] {r['created_at'][:10]} — {fmt(r['amount'], cur)}"
+            if r["note"]:
+                entry += f" _({r['note']})_"
+            lines.append(entry)
     send_message(chat_id, "\n".join(lines))
 
 
 def cmd_history(chat_id, args):
-    rows = db.get_history(chat_id, days=7)
+    cur = db.get_currency(chat_id)
+    rows = db.get_recent_expenses(chat_id, days=7, limit=50)
     if not rows:
         send_message(chat_id, "No spending in the last 7 days.")
         return
     by_day = {}
     for r in rows:
-        by_day.setdefault(r["day"], []).append((r["category"], r["total"]))
+        day = r["created_at"][:10]
+        by_day.setdefault(day, []).append(r)
     lines = ["📅 *Last 7 days*\n"]
     for day in sorted(by_day.keys(), reverse=True):
-        day_total = sum(t for _, t in by_day[day])
-        lines.append(f"*{day}* — {fmt(day_total)}")
-        for cat, total in by_day[day]:
-            lines.append(f"   {cat.title()}: {fmt(total)}")
+        day_total = sum(r["amount"] for r in by_day[day])
+        lines.append(f"*{day}* — {fmt(day_total, cur)}")
+        for r in by_day[day]:
+            entry = f"   [{r['id']}] {r['category'].title()}: {fmt(r['amount'], cur)}"
+            if r["note"]:
+                entry += f" _({r['note']})_"
+            lines.append(entry)
     send_message(chat_id, "\n".join(lines))
 
 
 def cmd_savings(chat_id, args):
+    cur = db.get_currency(chat_id)
     budgets = db.get_budgets(chat_id)
     savings_budget = budgets.get("savings")
     if savings_budget is None:
@@ -220,17 +244,19 @@ def cmd_savings(chat_id, args):
     saved = db.get_category_spent_this_month(chat_id, "savings")
     send_message(
         chat_id,
-        f"🎯 *Savings*\nGoal: {fmt(savings_budget)}\nSaved so far: {fmt(saved)}\n"
+        f"🎯 *Savings*\nGoal: {fmt(savings_budget, cur)}\nSaved so far: {fmt(saved, cur)}\n"
         f"(log savings with `/spend 20000 savings`)",
     )
 
 
 def cmd_settings(chat_id, args):
+    cur = db.get_currency(chat_id)
     income = db.get_income(chat_id)
     budgets = db.get_budgets(chat_id)
     lines = [
         "⚙️ *Settings*\n",
-        f"Monthly income: {fmt(income)} — change with `/income <amount>`",
+        f"Monthly income: {fmt(income, cur)} — change with `/income <amount>`",
+        f"Currency: {cur} — change with `/currency <symbol>`",
         f"Categories: {', '.join(c.title() for c in budgets) or 'none yet'} — "
         f"add/edit with `/setbudget <category> <amount>`",
         "Reset this month's expenses: `/resetmonth`",
@@ -244,6 +270,7 @@ def cmd_resetmonth(chat_id, args):
 
 
 def cmd_undo(chat_id, args):
+    cur = db.get_currency(chat_id)
     last = db.get_last_expense(chat_id)
     if not last:
         send_message(chat_id, "No expenses logged yet — nothing to undo.")
@@ -251,8 +278,21 @@ def cmd_undo(chat_id, args):
     db.delete_expense(chat_id, last["id"])
     send_message(
         chat_id,
-        f"↩️ Removed: {fmt(last['amount'])} from *{last['category'].title()}*",
+        f"↩️ Removed: {fmt(last['amount'], cur)} from *{last['category'].title()}*",
     )
+
+
+def cmd_edit(chat_id, args):
+    if len(args) < 2 or not args[0].isdigit() or not args[1].replace(".", "", 1).isdigit():
+        send_message(chat_id, "Usage: `/edit 42 3000` (id from `/history` or `/category`, then new amount)")
+        return
+    expense_id = int(args[0])
+    new_amount = float(args[1])
+    cur = db.get_currency(chat_id)
+    if db.update_expense_amount(chat_id, expense_id, new_amount):
+        send_message(chat_id, f"✏️ Entry [{expense_id}] updated to {fmt(new_amount, cur)}")
+    else:
+        send_message(chat_id, f"No entry found with id {expense_id}. Check `/history` for ids.")
 
 
 def cmd_deletebudget(chat_id, args):
@@ -267,17 +307,85 @@ def cmd_deletebudget(chat_id, args):
 
 
 def cmd_categories(chat_id, args):
+    cur = db.get_currency(chat_id)
     budgets = db.get_budgets(chat_id)
     if not budgets:
         send_message(chat_id, "No categories yet. Try `/setbudget food 50000`")
         return
     lines = ["📋 *Categories*\n"]
     for cat, amt in budgets.items():
-        lines.append(f"• {cat.title()} — {fmt(amt)}/month")
+        lines.append(f"• {cat.title()} — {fmt(amt, cur)}/month")
     send_message(chat_id, "\n".join(lines))
 
 
+def cmd_top(chat_id, args):
+    cur = db.get_currency(chat_id)
+    spent_by_cat = db.get_all_spent_this_month(chat_id)
+    if not spent_by_cat:
+        send_message(chat_id, "No spending logged this month yet.")
+        return
+    ranked = sorted(spent_by_cat.items(), key=lambda kv: kv[1], reverse=True)[:3]
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["🏆 *Top spending categories this month*\n"]
+    for i, (cat, amt) in enumerate(ranked):
+        lines.append(f"{medals[i]} {cat.title()} — {fmt(amt, cur)}")
+    send_message(chat_id, "\n".join(lines))
+
+
+def cmd_compare(chat_id, args):
+    cur = db.get_currency(chat_id)
+    now = datetime.datetime.utcnow()
+    this_month_total = db.get_month_total(chat_id, now.year, now.month)
+    prev_month = now.month - 1 or 12
+    prev_year = now.year if now.month > 1 else now.year - 1
+    last_month_total = db.get_month_total(chat_id, prev_year, prev_month)
+
+    lines = [
+        "📈 *This month vs last month*\n",
+        f"This month so far: {fmt(this_month_total, cur)}",
+        f"Last month (full): {fmt(last_month_total, cur)}",
+    ]
+    if last_month_total:
+        diff = this_month_total - last_month_total
+        pct = abs(diff) / last_month_total * 100
+        if diff > 0:
+            lines.append(f"📈 {fmt(diff, cur)} more than last month so far ({pct:.0f}%)")
+        elif diff < 0:
+            lines.append(f"📉 {fmt(-diff, cur)} less than last month so far ({pct:.0f}%)")
+        else:
+            lines.append("Exactly even with last month so far.")
+    send_message(chat_id, "\n".join(lines))
+
+
+def cmd_weekly(chat_id, args):
+    cur = db.get_currency(chat_id)
+    rows = db.get_recent_expenses(chat_id, days=28, limit=1000)
+    if not rows:
+        send_message(chat_id, "No spending in the last 4 weeks.")
+        return
+    by_week = {}
+    for r in rows:
+        d = datetime.datetime.strptime(r["created_at"][:10], "%Y-%m-%d")
+        week_start = d - datetime.timedelta(days=d.weekday())
+        key = week_start.strftime("%Y-%m-%d")
+        by_week[key] = by_week.get(key, 0) + r["amount"]
+    lines = ["🗓️ *Last 4 weeks*\n"]
+    for week_start in sorted(by_week.keys(), reverse=True):
+        lines.append(f"Week of {week_start} — {fmt(by_week[week_start], cur)}")
+    send_message(chat_id, "\n".join(lines))
+
+
+def cmd_currency(chat_id, args):
+    if not args or len(args[0]) > 4:
+        send_message(chat_id, "Usage: `/currency $` (or ₦, €, £, etc — keep it short)")
+        return
+    symbol = args[0]
+    db.set_currency(chat_id, symbol)
+    send_message(chat_id, f"✅ Currency set to {symbol} — amounts will show as {symbol}1,000 from now on")
+
+
 def cmd_forecast(chat_id, args):
+    cur = db.get_currency(chat_id)
     income = db.get_income(chat_id)
     spent_by_cat = db.get_all_spent_this_month(chat_id)
     total_spent = sum(spent_by_cat.values())
@@ -286,15 +394,15 @@ def cmd_forecast(chat_id, args):
 
     lines = [
         "🔮 *Month-end forecast*\n",
-        f"Spent so far: {fmt(total_spent)} ({fraction_elapsed*100:.0f}% through the month)",
-        f"Projected total by month-end: {fmt(projected)}",
+        f"Spent so far: {fmt(total_spent, cur)} ({fraction_elapsed*100:.0f}% through the month)",
+        f"Projected total by month-end: {fmt(projected, cur)}",
     ]
     if income:
         diff = income - projected
         if diff < 0:
-            lines.append(f"⚠️ That's {fmt(-diff)} over your {fmt(income)} income at this pace.")
+            lines.append(f"⚠️ That's {fmt(-diff, cur)} over your {fmt(income, cur)} income at this pace.")
         else:
-            lines.append(f"✅ That leaves you {fmt(diff)} under your {fmt(income)} income.")
+            lines.append(f"✅ That leaves you {fmt(diff, cur)} under your {fmt(income, cur)} income.")
     send_message(chat_id, "\n".join(lines))
 
 
@@ -328,12 +436,17 @@ def cmd_help(chat_id, args):
         "/category <name>\n"
         "/history\n"
         "/categories\n"
+        "/top\n"
+        "/compare\n"
+        "/weekly\n"
         "/forecast\n"
         "/undo\n"
+        "/edit <id> <amount>\n"
         "/deletebudget <category>\n"
+        "/currency <symbol>\n"
         "/resetmonth\n"
         "/export\n\n"
-        "Shortcut: just type `2500 food` to log an expense.",
+        "Shortcut: just type `2500 food` to log an expense, or `2500 food (lunch)` to add a note.",
     )
 
 
@@ -348,8 +461,13 @@ COMMANDS = {
     "/history": cmd_history,
     "/resetmonth": cmd_resetmonth,
     "/undo": cmd_undo,
+    "/edit": cmd_edit,
     "/deletebudget": cmd_deletebudget,
     "/categories": cmd_categories,
+    "/top": cmd_top,
+    "/compare": cmd_compare,
+    "/weekly": cmd_weekly,
+    "/currency": cmd_currency,
     "/forecast": cmd_forecast,
     "/export": cmd_export,
     "/help": cmd_help,
@@ -363,7 +481,8 @@ BUTTON_MAP = {
     "⚙️ Settings": cmd_settings,
 }
 
-QUICK_EXPENSE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s+([a-zA-Z][a-zA-Z ]*)\s*$")
+QUICK_EXPENSE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s+([a-zA-Z][a-zA-Z ]*?)\s*$")
+BRACKET_NOTE_RE = re.compile(r"^(.*?)\s*\(([^)]*)\)\s*$")
 
 
 def handle_text(chat_id, text):
@@ -394,6 +513,17 @@ def handle_text(chat_id, text):
         category = m.group(2).strip()
         _log_expense(chat_id, amount, category)
         return
+
+    # "2500 food (lunch with friends)" — strip the bracket note, then parse as usual
+    bracket_match = BRACKET_NOTE_RE.match(text)
+    if bracket_match:
+        stripped, note = bracket_match.group(1).strip(), bracket_match.group(2).strip()
+        m = QUICK_EXPENSE_RE.match(stripped)
+        if m:
+            amount = float(m.group(1))
+            category = m.group(2).strip()
+            _log_expense(chat_id, amount, category, note)
+            return
 
     send_message(chat_id, "Not sure what that means. Try /help or the menu below.", keyboard=MENU_KEYBOARD)
 

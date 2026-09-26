@@ -175,6 +175,110 @@ def month_progress():
     return day, days_in_month, day / days_in_month
 
 
+def get_currency(chat_id):
+    conn = get_conn()
+    row = conn.execute("SELECT currency FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+    conn.close()
+    return row["currency"] if row and row["currency"] else "₦"
+
+
+def set_currency(chat_id, symbol):
+    ensure_user(chat_id)
+    conn = get_conn()
+    conn.execute("UPDATE users SET currency = ? WHERE chat_id = ?", (symbol, chat_id))
+    conn.commit()
+    conn.close()
+
+
+def update_expense_amount(chat_id, expense_id, new_amount):
+    conn = get_conn()
+    cur = conn.execute(
+        "UPDATE expenses SET amount = ? WHERE chat_id = ? AND id = ?",
+        (new_amount, chat_id, expense_id),
+    )
+    conn.commit()
+    updated = cur.rowcount > 0
+    conn.close()
+    return updated
+
+
+def get_month_total(chat_id, year, month):
+    start = datetime.datetime(year, month, 1)
+    if month == 12:
+        end = datetime.datetime(year + 1, 1, 1)
+    else:
+        end = datetime.datetime(year, month + 1, 1)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses "
+        "WHERE chat_id = ? AND created_at >= ? AND created_at < ?",
+        (chat_id, start.isoformat(), end.isoformat()),
+    ).fetchone()
+    conn.close()
+    return row["total"]
+
+
+def get_last_expense(chat_id):
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id, category, amount, created_at FROM expenses "
+        "WHERE chat_id = ? ORDER BY id DESC LIMIT 1",
+        (chat_id,),
+    ).fetchone()
+    conn.close()
+    return row
+
+
+def delete_expense(chat_id, expense_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM expenses WHERE chat_id = ? AND id = ?", (chat_id, expense_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_budget(chat_id, category):
+    conn = get_conn()
+    cur = conn.execute(
+        "DELETE FROM budgets WHERE chat_id = ? AND category = ?", (chat_id, category.lower())
+    )
+    conn.commit()
+    deleted = cur.rowcount > 0
+    conn.close()
+    return deleted
+
+
+def get_recent_expenses(chat_id, category=None, days=None, limit=10):
+    """Individual expense rows (not aggregated), newest first — used to show
+    notes/descriptions next to each entry."""
+    query = "SELECT id, category, amount, note, created_at FROM expenses WHERE chat_id = ?"
+    params = [chat_id]
+    if category:
+        query += " AND category = ?"
+        params.append(category.lower())
+    if days:
+        since = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+        query += " AND date(created_at) >= ?"
+        params.append(since)
+    query += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    conn = get_conn()
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return rows
+
+
+def get_all_expenses(chat_id):
+    """All-time expense rows, oldest first — used for CSV export."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, category, amount, note, created_at FROM expenses "
+        "WHERE chat_id = ? ORDER BY created_at ASC",
+        (chat_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 def reset_month(chat_id):
     start, _, _, _ = _month_bounds()
     conn = get_conn()
