@@ -166,6 +166,34 @@ def cmd_dashboard(chat_id, args):
     send_message(chat_id, "\n".join(lines))
 
 
+def cmd_category(chat_id, args):
+    if not args:
+        send_message(chat_id, "Usage: `/category food`")
+        return
+    category = " ".join(args).lower()
+    budgets = db.get_budgets(chat_id)
+    budget_amount = budgets.get(category)
+    spent = db.get_category_spent_this_month(chat_id, category)
+
+    if budget_amount is None:
+        send_message(
+            chat_id,
+            f"📁 *{category.title()}*\nSpent this month: {fmt(spent)}\n"
+            f"No budget set for this category — try `/setbudget {category} 50000`",
+        )
+        return
+
+    remaining = budget_amount - spent
+    pct = (spent / budget_amount * 100) if budget_amount else 0
+    lines = [
+        f"📁 *{category.title()}*\n",
+        f"Budget: {fmt(budget_amount)}/month",
+        f"Spent: {fmt(spent)} ({pct:.0f}% used)",
+        f"Remaining: {fmt(remaining)}",
+    ]
+    send_message(chat_id, "\n".join(lines))
+
+
 def cmd_history(chat_id, args):
     rows = db.get_history(chat_id, days=7)
     if not rows:
@@ -215,6 +243,79 @@ def cmd_resetmonth(chat_id, args):
     send_message(chat_id, "🗑️ This month's expenses have been cleared.")
 
 
+def cmd_undo(chat_id, args):
+    last = db.get_last_expense(chat_id)
+    if not last:
+        send_message(chat_id, "No expenses logged yet — nothing to undo.")
+        return
+    db.delete_expense(chat_id, last["id"])
+    send_message(
+        chat_id,
+        f"↩️ Removed: {fmt(last['amount'])} from *{last['category'].title()}*",
+    )
+
+
+def cmd_deletebudget(chat_id, args):
+    if not args:
+        send_message(chat_id, "Usage: `/deletebudget food`")
+        return
+    category = " ".join(args)
+    if db.delete_budget(chat_id, category):
+        send_message(chat_id, f"🗑️ Removed budget for *{category.title()}*")
+    else:
+        send_message(chat_id, f"No budget found for *{category.title()}*")
+
+
+def cmd_categories(chat_id, args):
+    budgets = db.get_budgets(chat_id)
+    if not budgets:
+        send_message(chat_id, "No categories yet. Try `/setbudget food 50000`")
+        return
+    lines = ["📋 *Categories*\n"]
+    for cat, amt in budgets.items():
+        lines.append(f"• {cat.title()} — {fmt(amt)}/month")
+    send_message(chat_id, "\n".join(lines))
+
+
+def cmd_forecast(chat_id, args):
+    income = db.get_income(chat_id)
+    spent_by_cat = db.get_all_spent_this_month(chat_id)
+    total_spent = sum(spent_by_cat.values())
+    day, days_in_month, fraction_elapsed = db.month_progress()
+    projected = (total_spent / day) * days_in_month if day else total_spent
+
+    lines = [
+        "🔮 *Month-end forecast*\n",
+        f"Spent so far: {fmt(total_spent)} ({fraction_elapsed*100:.0f}% through the month)",
+        f"Projected total by month-end: {fmt(projected)}",
+    ]
+    if income:
+        diff = income - projected
+        if diff < 0:
+            lines.append(f"⚠️ That's {fmt(-diff)} over your {fmt(income)} income at this pace.")
+        else:
+            lines.append(f"✅ That leaves you {fmt(diff)} under your {fmt(income)} income.")
+    send_message(chat_id, "\n".join(lines))
+
+
+def cmd_export(chat_id, args):
+    rows = db.get_all_expenses(chat_id)
+    if not rows:
+        send_message(chat_id, "No expenses to export yet.")
+        return
+    lines = ["date,category,amount,note"]
+    for r in rows:
+        note = (r["note"] or "").replace(",", ";")
+        lines.append(f"{r['created_at']},{r['category']},{r['amount']},{note}")
+    csv_text = "\n".join(lines)
+    requests.post(
+        f"{TELEGRAM_API}/sendDocument",
+        data={"chat_id": chat_id},
+        files={"document": ("spendiabot_export.csv", csv_text, "text/csv")},
+        timeout=15,
+    )
+
+
 def cmd_help(chat_id, args):
     send_message(
         chat_id,
@@ -224,8 +325,14 @@ def cmd_help(chat_id, args):
         "/budget\n"
         "/spend <amount> <category> [note]\n"
         "/dashboard\n"
+        "/category <name>\n"
         "/history\n"
-        "/resetmonth\n\n"
+        "/categories\n"
+        "/forecast\n"
+        "/undo\n"
+        "/deletebudget <category>\n"
+        "/resetmonth\n"
+        "/export\n\n"
         "Shortcut: just type `2500 food` to log an expense.",
     )
 
@@ -237,8 +344,14 @@ COMMANDS = {
     "/budget": cmd_budget,
     "/spend": cmd_spend,
     "/dashboard": cmd_dashboard,
+    "/category": cmd_category,
     "/history": cmd_history,
     "/resetmonth": cmd_resetmonth,
+    "/undo": cmd_undo,
+    "/deletebudget": cmd_deletebudget,
+    "/categories": cmd_categories,
+    "/forecast": cmd_forecast,
+    "/export": cmd_export,
     "/help": cmd_help,
 }
 
