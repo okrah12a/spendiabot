@@ -24,6 +24,12 @@ def get_conn():
     return conn
 
 
+def _add_column_if_missing(conn, table, column, coltype):
+    cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 def init_db():
     conn = get_conn()
     c = conn.cursor()
@@ -35,6 +41,12 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Usage-tracking columns (added via migration so existing DBs upgrade in place)
+    _add_column_if_missing(conn, "users", "username", "TEXT")
+    _add_column_if_missing(conn, "users", "first_name", "TEXT")
+    _add_column_if_missing(conn, "users", "last_seen", "TEXT")
+    _add_column_if_missing(conn, "users", "message_count", "INTEGER DEFAULT 0")
+    conn.commit()
     c.execute("""
         CREATE TABLE IF NOT EXISTS budgets (
             chat_id INTEGER,
@@ -274,6 +286,56 @@ def get_all_expenses(chat_id):
         "SELECT id, category, amount, note, created_at FROM expenses "
         "WHERE chat_id = ? ORDER BY created_at ASC",
         (chat_id,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def touch_user(chat_id, username=None, first_name=None):
+    """Call this on every incoming message. Upserts the user, stamps last_seen
+    'now', and increments their lifetime message_count."""
+    ensure_user(chat_id)
+    conn = get_conn()
+    conn.execute(
+        "UPDATE users SET username = ?, first_name = ?, last_seen = ?, "
+        "message_count = COALESCE(message_count, 0) + 1 WHERE chat_id = ?",
+        (username, first_name, datetime.datetime.utcnow().isoformat(), chat_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_usage_stats():
+    """High-level counts for a /stats command: total users, and how many
+    were active in the last 1 / 7 / 30 days."""
+    now = datetime.datetime.utcnow()
+    conn = get_conn()
+    total = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+
+    def active_since(days):
+        cutoff = (now - datetime.timedelta(days=days)).isoformat()
+        return conn.execute(
+            "SELECT COUNT(*) AS n FROM users WHERE last_seen >= ?", (cutoff,)
+        ).fetchone()["n"]
+
+    stats = {
+        "total_users": total,
+        "active_1d": active_since(1),
+        "active_7d": active_since(7),
+        "active_30d": active_since(30),
+    }
+    conn.close()
+    return stats
+
+
+def get_active_users(limit=20):
+    """Most active users by lifetime message_count, most recently seen first
+    as a tiebreaker. Good for a leaderboard-style /stats view."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT chat_id, username, first_name, message_count, last_seen, created_at "
+        "FROM users ORDER BY message_count DESC, last_seen DESC LIMIT ?",
+        (limit,),
     ).fetchall()
     conn.close()
     return rows

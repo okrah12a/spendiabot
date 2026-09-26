@@ -20,6 +20,9 @@ import db
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 CURRENCY = "₦"
+# Your own Telegram chat_id (DM @userinfobot to get it). Only this chat_id
+# can run /stats. Leave unset and /stats is disabled entirely.
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID", "")
 
 app = Flask(__name__)
 db.init_db()
@@ -424,6 +427,27 @@ def cmd_export(chat_id, args):
     )
 
 
+def cmd_stats(chat_id, args):
+    if not ADMIN_CHAT_ID or str(chat_id) != str(ADMIN_CHAT_ID):
+        send_message(chat_id, "Unknown command. Try /help")
+        return
+
+    s = db.get_usage_stats()
+    lines = [
+        "📈 *Bot usage*\n",
+        f"Total users: {s['total_users']}",
+        f"Active today: {s['active_1d']}",
+        f"Active last 7 days: {s['active_7d']}",
+        f"Active last 30 days: {s['active_30d']}\n",
+        "*Top users (by messages sent):*",
+    ]
+    for u in db.get_active_users(limit=15):
+        name = u["username"] or u["first_name"] or str(u["chat_id"])
+        last_seen = (u["last_seen"] or "")[:16].replace("T", " ")
+        lines.append(f"• {name} — {u['message_count']} msgs (last: {last_seen})")
+    send_message(chat_id, "\n".join(lines))
+
+
 def cmd_help(chat_id, args):
     send_message(
         chat_id,
@@ -471,6 +495,7 @@ COMMANDS = {
     "/forecast": cmd_forecast,
     "/export": cmd_export,
     "/help": cmd_help,
+    "/stats": cmd_stats,
 }
 
 BUTTON_MAP = {
@@ -538,6 +563,9 @@ def webhook():
         return jsonify(ok=True)
 
     chat_id = message["chat"]["id"]
+    from_user = message.get("from") or {}
+    db.touch_user(chat_id, from_user.get("username"), from_user.get("first_name"))
+
     text = message.get("text", "")
     if text:
         try:
